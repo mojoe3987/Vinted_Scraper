@@ -12,6 +12,7 @@ import pandas as pd
 import json
 from storage import VintedStorage
 import uuid  # Add this import for generating unique IDs
+import requests  # Added for image downloading
 
 # Add the project directory to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -261,6 +262,36 @@ class Scraper:
             
         return details
 
+    def _save_images(self, unique_id, image_urls):
+        """Save product images to GCS"""
+        try:
+            image_paths = []
+            for idx, img_url in enumerate(image_urls, 1):
+                # Create image filename with product ID and sequence number
+                image_filename = f"scrape_images/{unique_id}_image_{idx}.jpg"
+                
+                # Download image and upload to GCS
+                blob = self.storage.bucket.blob(image_filename)
+                
+                # Use requests to download the image
+                response = requests.get(img_url)
+                if response.status_code == 200:
+                    # Upload image content directly to GCS
+                    blob.upload_from_string(
+                        response.content,
+                        content_type='image/jpeg'
+                    )
+                    image_paths.append(image_filename)
+                    print(f"Saved image {idx} to GCS: {image_filename}")
+                
+                # Add small delay between image downloads
+                time.sleep(random.uniform(0.5, 1))
+            
+            return image_paths
+        except Exception as e:
+            print(f"Error saving images: {e}")
+            return []
+
     def scrape_product(self, product_url):
         """Scrape a single product page"""
         try:
@@ -273,17 +304,35 @@ class Scraper:
             unique_id = str(uuid.uuid4())
 
             product_data = {
-                'id': unique_id,  # Add unique ID as first field
+                'id': unique_id,
                 'scrape_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'url': product_url
             }
 
-            # Get the main container
             try:
                 main_container = self.driver.find_element(By.CLASS_NAME, "details-list--main-info").find_element(By.XPATH, '..')
                 details = self._extract_details_from_container(main_container)
                 product_data.update(details)
-                
+
+                # Get all image URLs from the item-photos container
+                image_urls = []
+                try:
+                    image_elements = self.driver.find_elements(
+                        By.CSS_SELECTOR,
+                        ".item-photos img.web_ui__Image__content"
+                    )
+                    image_urls = [img.get_attribute('src') for img in image_elements if img.get_attribute('src')]
+                    
+                    # Save images to GCS and get their paths
+                    if image_urls:
+                        image_paths = self._save_images(unique_id, image_urls)
+                        product_data['image_paths'] = image_paths
+                        product_data['image_count'] = len(image_paths)
+                except Exception as e:
+                    print(f"Error getting images: {e}")
+                    product_data['image_paths'] = []
+                    product_data['image_count'] = 0
+
                 # Get description separately as it might be in a different location
                 description = self._get_text('/html/body/div[1]/div/main/div/div[1]/div/div[2]/div/div/main/div[1]/aside/div[2]/div[1]/div/div/div/div/div/div[2]/div[3]/div/div/div[1]/div/span/span')
                 if description:
